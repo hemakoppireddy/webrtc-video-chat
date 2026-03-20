@@ -19,14 +19,17 @@ export default function RoomPage() {
   const [isCameraOff, setIsCameraOff] = useState(false);
   const [status, setStatus] = useState("waiting");
 
+  //  Chat state
+  const [message, setMessage] = useState("");
+  const [chatLog, setChatLog] = useState<{ from: string; message: string }[]>([]);
+
   useEffect(() => {
     socket = io("http://localhost:3000");
 
-    // 🎥 Get local media
+    //  Media
     navigator.mediaDevices.getUserMedia({ video: true, audio: true })
       .then((stream) => {
         localStreamRef.current = stream;
-
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
         }
@@ -36,22 +39,16 @@ export default function RoomPage() {
       socket.emit("join-room", { roomId });
     });
 
-    // 🔹 Existing users
     socket.on("existing-users", (users: string[]) => {
       if (users.length > 0) setStatus("connecting");
-
-      users.forEach(userId => {
-        createPeerConnection(userId, true);
-      });
+      users.forEach(userId => createPeerConnection(userId, true));
     });
 
-    // 🔹 New user joined
     socket.on("user-joined", (userId: string) => {
       setStatus("connecting");
       createPeerConnection(userId, false);
     });
 
-    // 🔹 Offer
     socket.on("offer", async ({ from, offer }) => {
       const pc = createPeerConnection(from, false);
       await pc.setRemoteDescription(offer);
@@ -62,28 +59,23 @@ export default function RoomPage() {
       socket.emit("answer", { to: from, answer });
     });
 
-    // 🔹 Answer
     socket.on("answer", async ({ from, answer }) => {
-      const pc = peerConnections[from];
-      await pc.setRemoteDescription(answer);
+      await peerConnections[from].setRemoteDescription(answer);
     });
 
-    // 🔹 ICE
     socket.on("ice-candidate", async ({ from, candidate }) => {
-      const pc = peerConnections[from];
-      if (pc) {
-        await pc.addIceCandidate(candidate);
-      }
+      await peerConnections[from]?.addIceCandidate(candidate);
     });
 
-    // 🔹 Disconnect
     socket.on("user-disconnected", (userId: string) => {
-      if (peerConnections[userId]) {
-        peerConnections[userId].close();
-        delete peerConnections[userId];
-      }
-
+      peerConnections[userId]?.close();
+      delete peerConnections[userId];
       setRemoteStreams(prev => prev.filter(s => s.id !== userId));
+    });
+
+    //  Receive message
+    socket.on("chat-message", ({ from, message }) => {
+      setChatLog(prev => [...prev, { from, message }]);
     });
 
     return () => {
@@ -91,7 +83,7 @@ export default function RoomPage() {
     };
   }, [roomId]);
 
-  // 🔥 Peer Connection
+  //  Peer
   const createPeerConnection = (userId: string, isInitiator: boolean) => {
     if (peerConnections[userId]) return peerConnections[userId];
 
@@ -103,81 +95,65 @@ export default function RoomPage() {
 
     peerConnections[userId] = pc;
 
-    // Add tracks
     localStreamRef.current?.getTracks().forEach(track => {
       pc.addTrack(track, localStreamRef.current!);
     });
 
-    // Remote stream
     pc.ontrack = (event) => {
-      const stream = event.streams[0];
-
       setStatus("connected");
 
+      const stream = event.streams[0];
       setRemoteStreams(prev => {
         if (prev.find(s => s.id === userId)) return prev;
         return [...prev, { id: userId, stream }];
       });
     };
 
-    // ICE
     pc.onicecandidate = (event) => {
       if (event.candidate) {
-        socket.emit("ice-candidate", {
-          to: userId,
-          candidate: event.candidate
-        });
+        socket.emit("ice-candidate", { to: userId, candidate: event.candidate });
       }
     };
 
-    // Offer
     if (isInitiator) {
       pc.createOffer()
-        .then(offer => pc.setLocalDescription(offer))
+        .then(o => pc.setLocalDescription(o))
         .then(() => {
-          socket.emit("offer", {
-            to: userId,
-            offer: pc.localDescription
-          });
+          socket.emit("offer", { to: userId, offer: pc.localDescription });
         });
     }
 
     return pc;
   };
 
-  // 🔇 MIC
+  //  Mic
   const toggleMic = () => {
-    const stream = localStreamRef.current;
-    if (!stream) return;
-
-    stream.getAudioTracks().forEach(track => {
-      track.enabled = !track.enabled;
-    });
-
+    localStreamRef.current?.getAudioTracks().forEach(t => t.enabled = !t.enabled);
     setIsMuted(prev => !prev);
   };
 
-  // 📷 CAMERA
+  // Camera
   const toggleCamera = () => {
-    const stream = localStreamRef.current;
-    if (!stream) return;
-
-    stream.getVideoTracks().forEach(track => {
-      track.enabled = !track.enabled;
-    });
-
+    localStreamRef.current?.getVideoTracks().forEach(t => t.enabled = !t.enabled);
     setIsCameraOff(prev => !prev);
   };
 
-  // 🔴 HANGUP
+  //  Hangup
   const handleHangup = () => {
     Object.values(peerConnections).forEach(pc => pc.close());
-
-    localStreamRef.current?.getTracks().forEach(track => track.stop());
-
+    localStreamRef.current?.getTracks().forEach(t => t.stop());
     socket.disconnect();
-
     router.push("/");
+  };
+
+  //  Send message
+  const sendMessage = () => {
+    if (!message.trim()) return;
+
+    socket.emit("chat-message", { roomId, message });
+
+    setChatLog(prev => [...prev, { from: "You", message }]);
+    setMessage("");
   };
 
   return (
@@ -187,18 +163,12 @@ export default function RoomPage() {
 
       {/* STATUS */}
       <div className="mb-4">
-        {status === "waiting" && (
-          <p data-test-id="status-waiting">Waiting for others...</p>
-        )}
-        {status === "connecting" && (
-          <p data-test-id="status-connecting">Connecting...</p>
-        )}
-        {status === "connected" && (
-          <p data-test-id="status-connected">Connected</p>
-        )}
+        {status === "waiting" && <p data-test-id="status-waiting">Waiting...</p>}
+        {status === "connecting" && <p data-test-id="status-connecting">Connecting...</p>}
+        {status === "connected" && <p data-test-id="status-connected">Connected</p>}
       </div>
 
-      {/* LOCAL VIDEO */}
+      {/* LOCAL */}
       <video
         ref={localVideoRef}
         autoPlay
@@ -208,49 +178,59 @@ export default function RoomPage() {
         data-test-id="local-video"
       />
 
-      {/* REMOTE VIDEOS */}
-      <div
-        className="grid grid-cols-2 gap-4"
-        data-test-id="remote-video-container"
-      >
-        {remoteStreams.map((remote) => (
+      {/* REMOTE */}
+      <div className="grid grid-cols-2 gap-4 mb-4" data-test-id="remote-video-container">
+        {remoteStreams.map((r) => (
           <video
-            key={remote.id}
+            key={r.id}
             autoPlay
             playsInline
             className="w-64 border"
-            ref={(video) => {
-              if (video) video.srcObject = remote.stream;
-            }}
+            ref={(v) => { if (v) v.srcObject = r.stream; }}
           />
         ))}
       </div>
 
       {/* CONTROLS */}
-      <div className="flex gap-4 mt-4">
-
-        <button
-          onClick={toggleMic}
-          data-test-id="mute-mic-button"
-          className="px-4 py-2 bg-blue-500 text-white rounded"
-        >
-          {isMuted ? "Unmute Mic" : "Mute Mic"}
+      <div className="flex gap-4 mb-4">
+        <button data-test-id="mute-mic-button" onClick={toggleMic} className="bg-blue-500 px-4 py-2 text-white rounded">
+          {isMuted ? "Unmute" : "Mute"}
         </button>
 
-        <button
-          onClick={toggleCamera}
-          data-test-id="toggle-camera-button"
-          className="px-4 py-2 bg-yellow-500 text-white rounded"
-        >
-          {isCameraOff ? "Turn Camera On" : "Turn Camera Off"}
+        <button data-test-id="toggle-camera-button" onClick={toggleCamera} className="bg-yellow-500 px-4 py-2 text-white rounded">
+          {isCameraOff ? "Camera On" : "Camera Off"}
         </button>
 
+        <button data-test-id="hangup-button" onClick={handleHangup} className="bg-red-500 px-4 py-2 text-white rounded">
+          Hangup
+        </button>
+      </div>
+
+      {/* CHAT */}
+      <div className="border p-3 w-80">
+
+        <div className="h-40 overflow-y-auto mb-2" data-test-id="chat-log">
+          {chatLog.map((msg, i) => (
+            <div key={i} data-test-id="chat-message">
+              <strong>{msg.from}: </strong>{msg.message}
+            </div>
+          ))}
+        </div>
+
+        <input
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+          placeholder="Type message..."
+          data-test-id="chat-input"
+          className="border p-1 w-full mb-2"
+        />
+
         <button
-          onClick={handleHangup}
-          data-test-id="hangup-button"
-          className="px-4 py-2 bg-red-500 text-white rounded"
+          onClick={sendMessage}
+          data-test-id="chat-submit"
+          className="bg-green-500 text-white px-3 py-1 w-full"
         >
-          Hang Up
+          Send
         </button>
 
       </div>
